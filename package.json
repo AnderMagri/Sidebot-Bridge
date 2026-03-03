@@ -1,0 +1,35 @@
+{
+  "name": "sidebot-bridge",
+  "version": "1.0.0",
+  "description": "Bridge server connecting Figma Plugin to Claude Desktop",
+  "main": "bridge-server.js",
+  "bin": "bridge-server.js",
+  "scripts": {
+    "start": "node bridge-server.js",
+    "dev": "nodemon bridge-server.js",
+    "build": "pkg . --out-path dist",
+    "build:mac-arm64": "pkg . --targets node22-macos-arm64 --output dist/sidebot-bridge-mac-arm64",
+    "build:mac-x64":   "pkg . --targets node22-macos-x64   --output dist/sidebot-bridge-mac-x64",
+    "build:win":       "pkg . --targets node22-win-x64     --output dist/sidebot-bridge-win-x64.exe"
+  },
+  "pkg": {
+    "targets": [
+      "node22-macos-arm64",
+      "node22-macos-x64",
+      "node22-win-x64"
+    ],
+    "assets": [],
+    "outputPath": "dist"
+  },
+  "keywords": ["figma", "claude", "bridge"],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.36.3",
+    "ws": "^8.14.2"
+  },
+  "devDependencies": {
+    "@yao-pkg/pkg": "^6.14.1",
+    "nodemon": "^3.0.1"
+  }
+}
