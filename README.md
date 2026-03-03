@@ -10,7 +10,7 @@ No more copy/paste! Real-time communication via localhost bridge.
 
 > No Node.js required. Just download and double-click.
 
-Go to the [Releases page](https://github.com/AnderMagri/Sidebot/releases) and download the file for your platform.
+Go to the [Releases page](https://github.com/AnderMagri/Sidebot-Bridge/releases) and download the file for your platform.
 
 ### Mac (all models — M1/M2/M3/M4 and Intel)
 
