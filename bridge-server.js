@@ -49,6 +49,41 @@ function saveConfig(key) {
 
 loadConfig();
 
+// ─── FRIENDLY API ERROR MESSAGES ───
+function friendlyApiError(err) {
+  const msg = err.message || '';
+  // 529 Overloaded
+  if (err.status === 529 || msg.includes('529') || msg.includes('overloaded_error') || msg.includes('Overloaded')) {
+    return "Claude is overloaded right now — please wait a moment and try again.";
+  }
+  // 529 via raw JSON in message
+  try {
+    const parsed = JSON.parse(msg.slice(msg.indexOf('{')));
+    if (parsed?.error?.type === 'overloaded_error') {
+      return "Claude is overloaded right now — please wait a moment and try again.";
+    }
+  } catch (_) {}
+  // 401 / authentication
+  if (err.status === 401 || msg.includes('401') || msg.includes('authentication') || msg.includes('invalid x-api-key')) {
+    return "Invalid API key — check your Anthropic API key in Settings.";
+  }
+  // 429 Rate limit
+  if (err.status === 429 || msg.includes('429') || msg.includes('rate_limit') || msg.includes('rate limit')) {
+    return "Rate limit reached — please wait a moment and try again.";
+  }
+  // 500 / server error
+  if (err.status >= 500 || msg.includes('500') || msg.includes('server_error')) {
+    return "Anthropic is experiencing issues — please try again shortly.";
+  }
+  // Network / connection errors
+  if (msg.includes('ECONNREFUSED') || msg.includes('ENOTFOUND') || msg.includes('fetch failed') || msg.includes('network')) {
+    return "Network error — check your internet connection and try again.";
+  }
+  // Fallback — strip raw JSON from message if present
+  const clean = msg.replace(/\{.*\}/s, '').trim();
+  return clean || 'An unexpected error occurred — please try again.';
+}
+
 // ─── CRASH HANDLER (keeps window open on Windows so user can read the error) ───
 process.on('uncaughtException', (err) => {
   console.error('');
@@ -137,6 +172,7 @@ async function analyzeDesignWithClaude(ws, designData, action) {
     console.log(`[AI ] Sent ${fixes.length} ${action} fix(es)`);
 
   } catch (err) {
+    const friendly = friendlyApiError(err);
     console.error('[AI ] Error:', err.message);
     ws.send(JSON.stringify({
       type: 'add-fixes-from-claude',
@@ -144,8 +180,8 @@ async function analyzeDesignWithClaude(ws, designData, action) {
         action,
         nodeId: '',
         nodeName: 'Error',
-        issue: `Analysis failed: ${err.message}`,
-        description: 'Check your API key in the plugin Settings tab'
+        issue: friendly,
+        description: ''
       }]
     }));
   }
@@ -179,10 +215,11 @@ async function analyzeEdgeCasesWithClaude(ws, designData) {
     console.log(`[AI ] Sent ${cases.length} edge case(s)`);
 
   } catch (err) {
+    const friendly = friendlyApiError(err);
     console.error('[AI ] Error:', err.message);
     ws.send(JSON.stringify({
       type: 'add-edge-cases-from-claude',
-      cases: [`Analysis failed: ${err.message}. Check your API key in the plugin Settings tab.`],
+      cases: [friendly],
       frameName: 'Error'
     }));
   }
@@ -303,9 +340,10 @@ async function chatWithClaude(ws, text, history, designData, screenshotBase64) {
     console.log(`[AI ] Chat response sent (${response.usage.output_tokens} tokens)`);
 
   } catch (err) {
+    const friendly = friendlyApiError(err);
     console.error('[AI ] Chat error:', err.message);
     try {
-      ws.send(JSON.stringify({ type: 'chat-response', text: `Error: ${err.message}`, fixes: [] }));
+      ws.send(JSON.stringify({ type: 'chat-response', text: friendly, fixes: [] }));
     } catch (sendErr) {
       console.error('[AI ] Could not send error to plugin:', sendErr.message);
     }
