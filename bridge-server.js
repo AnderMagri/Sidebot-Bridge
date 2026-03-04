@@ -49,6 +49,129 @@ function saveConfig(key) {
 
 loadConfig();
 
+// ─── FIGMA LORE RAG ───────────────────────────────────────────────────────────
+// Loads all .jsonl records from Figma-Lore at startup, then retrieves the most
+// relevant records per request via keyword scoring (no embeddings needed).
+
+const LORE_SEARCH_PATHS = [
+  path.join(os.homedir(), 'Documents', 'GitHub', 'Figma-Lore', 'lore'),
+  path.join(os.homedir(), 'GitHub',             'Figma-Lore', 'lore'),
+  path.join(os.homedir(), 'Figma-Lore',                       'lore'),
+  path.join(__dirname,    'figma-lore',                        'lore'),
+];
+
+let loreRecords = [];  // all records in memory
+
+function loadLore() {
+  // 1. Check config for a custom path
+  let loreDir = null;
+  try {
+    const cfg = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
+    if (cfg.lorePath && fs.existsSync(cfg.lorePath)) loreDir = cfg.lorePath;
+  } catch (_) {}
+
+  // 2. Walk default search paths
+  if (!loreDir) {
+    for (const p of LORE_SEARCH_PATHS) {
+      if (fs.existsSync(p)) { loreDir = p; break; }
+    }
+  }
+
+  if (!loreDir) {
+    console.log('[LORE] Figma Lore not found — running without RAG knowledge base');
+    console.log('[LORE] Tip: set lorePath in ~/.sidebot/config.json to enable it');
+    return;
+  }
+
+  let count = 0;
+  try {
+    const files = fs.readdirSync(loreDir).filter(f => f.endsWith('.jsonl')).sort();
+    for (const file of files) {
+      const lines = fs.readFileSync(path.join(loreDir, file), 'utf8').split('\n');
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+          const rec = JSON.parse(line);
+          if (rec.id && rec.d) { loreRecords.push(rec); count++; }
+        } catch (_) {}
+      }
+    }
+    console.log(`[LORE] Loaded ${count} records from ${files.length} modules`);
+  } catch (err) {
+    console.error('[LORE] Error loading lore:', err.message);
+  }
+}
+
+// Common words that add no signal to keyword search
+const STOP_WORDS = new Set([
+  'the','a','an','is','are','was','were','be','been','being','have','has','had',
+  'do','does','did','will','would','could','should','may','might','must','shall',
+  'can','to','of','in','for','on','with','at','by','from','up','about','into',
+  'through','before','after','above','below','between','each','this','that',
+  'these','those','and','or','but','if','then','than','so','yet','both','not',
+  'no','nor','as','how','what','when','where','who','which','i','you','he','she',
+  'we','they','it','my','your','his','her','our','their','its','me','him','us','them'
+]);
+
+/**
+ * Score every lore record against `query` and return the top K.
+ * Scoring: title match +3, tag/cat match +2, body occurrence +1 (capped at 3).
+ */
+function searchLore(query, topK = 6) {
+  if (!loreRecords.length || !query) return [];
+
+  const keywords = query.toLowerCase()
+    .replace(/[^a-z0-9\s\-]/g, ' ')
+    .split(/\s+/)
+    .filter(w => w.length > 2 && !STOP_WORDS.has(w));
+
+  if (!keywords.length) return [];
+
+  const scored = loreRecords.map(rec => {
+    const title = (rec.t   || '').toLowerCase();
+    const cat   = (rec.cat || '').toLowerCase();
+    const tags  = (rec.tags || []).join(' ').toLowerCase();
+    const body  = (rec.d   || '').toLowerCase();
+    let score = 0;
+
+    for (const kw of keywords) {
+      if (title.includes(kw)) score += 3;
+      if (cat.includes(kw))   score += 2;
+      if (tags.includes(kw))  score += 2;
+      // Count body occurrences (capped at 3 per keyword)
+      let n = 0, pos = 0;
+      while ((pos = body.indexOf(kw, pos)) !== -1 && n < 3) { score++; n++; pos++; }
+    }
+
+    return { rec, score };
+  });
+
+  return scored
+    .filter(({ score }) => score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, topK)
+    .map(({ rec }) => rec);
+}
+
+/** Format retrieved records as a compact block to append to any prompt. */
+function formatLoreContext(records) {
+  if (!records.length) return '';
+  const lines = records.map(r => `**${r.t}**: ${r.d}`).join('\n\n');
+  return `\n\n## Figma Design Knowledge\n${lines}`;
+}
+
+// Action → search query mapping so each analysis type pulls the right lore
+const ACTION_LORE_QUERIES = {
+  grammar:     'text typography font spelling grammar punctuation copy writing',
+  autolayout:  'auto layout spacing padding gap sizing fill hug container direction',
+  alignment:   'alignment grid position constraints anchoring layout spacing',
+  contrast:    'contrast color accessibility WCAG ratio text background color blindness',
+  consistency: 'consistency design system tokens variables styles naming components grid',
+  'edge-cases':'edge cases empty state loading error offline permission accessibility overflow',
+};
+
+loadLore();
+
 // ─── FRIENDLY API ERROR MESSAGES ───
 function friendlyApiError(err) {
   const msg = err.message || '';
@@ -147,13 +270,18 @@ async function analyzeDesignWithClaude(ws, designData, action) {
 
   console.log(`[AI ] Analyzing "${action}" for: ${designData.projectName || 'unknown'}`);
 
+  // RAG: inject relevant Figma Lore into this analysis prompt
+  const loreHits = searchLore(ACTION_LORE_QUERIES[action] || action);
+  const loreBlock = formatLoreContext(loreHits);
+  if (loreHits.length) console.log(`[LORE] Injecting ${loreHits.length} records for "${action}" analysis`);
+
   try {
     const response = await anthropic.messages.create({
       model: 'claude-haiku-4-5-20251001',
       max_tokens: 4096,
       messages: [{
         role: 'user',
-        content: `${prompt}\n\nDesign data:\n${JSON.stringify(designData, null, 2)}`
+        content: `${prompt}${loreBlock}\n\nDesign data:\n${JSON.stringify(designData, null, 2)}`
       }]
     });
 
@@ -192,13 +320,18 @@ async function analyzeEdgeCasesWithClaude(ws, designData) {
   const prompt = PROMPTS['edge-cases'];
   console.log(`[AI ] Analyzing edge cases for: ${designData.projectName || 'unknown'}`);
 
+  // RAG: inject relevant Figma Lore
+  const loreHits = searchLore(ACTION_LORE_QUERIES['edge-cases']);
+  const loreBlock = formatLoreContext(loreHits);
+  if (loreHits.length) console.log(`[LORE] Injecting ${loreHits.length} records for edge-cases analysis`);
+
   try {
     const response = await anthropic.messages.create({
       model: 'claude-haiku-4-5-20251001',
       max_tokens: 2048,
       messages: [{
         role: 'user',
-        content: `${prompt}\n\nDesign data:\n${JSON.stringify(designData, null, 2)}`
+        content: `${prompt}${loreBlock}\n\nDesign data:\n${JSON.stringify(designData, null, 2)}`
       }]
     });
 
@@ -279,6 +412,12 @@ For **edge cases / free chat** — respond conversationally, no JSON needed.
 async function chatWithClaude(ws, text, history, designData, screenshotBase64) {
   try {
     console.log(`[AI ] Chat message: "${(text || '').slice(0, 60)}" ${screenshotBase64 ? '(+screenshot)' : ''}`);
+
+    // RAG: search lore using the user's message as query
+    const loreHits = searchLore(text || '');
+    const systemWithLore = CHAT_SYSTEM_PROMPT + formatLoreContext(loreHits);
+    if (loreHits.length) console.log(`[LORE] Injecting ${loreHits.length} records: ${loreHits.map(r => r.id).join(', ')}`);
+
     const messages = [];
     history.slice(0, -1).forEach(m => messages.push({ role: m.role, content: m.content }));
 
@@ -309,7 +448,7 @@ async function chatWithClaude(ws, text, history, designData, screenshotBase64) {
     const response = await anthropic.messages.create({
       model: 'claude-haiku-4-5-20251001',
       max_tokens: 1024,
-      system: CHAT_SYSTEM_PROMPT,
+      system: systemWithLore,
       messages
     });
 
@@ -474,6 +613,7 @@ console.log('===========================================');
 console.log('');
 console.log('[WS ] ws://localhost:' + WS_PORT);
 console.log('[AI ] ' + (anthropicApiKey ? 'Anthropic key configured' : 'no key — enter in plugin Settings tab'));
+console.log('[LORE] ' + (loreRecords.length ? `${loreRecords.length} records loaded — RAG active` : 'not found — running without knowledge base'));
 console.log('');
 console.log('Waiting for Figma plugin to connect...');
 console.log('');
